@@ -21,7 +21,11 @@ jobs:
           echo "Using $Z"
           unzip -o "$Z" -d work
       - name: Get llama.cpp
-        run: git clone --depth 1 --branch b5000 https://github.com/ggml-org/llama.cpp work/iChatOffline/app/src/main/cpp/llama.cpp
+        run: |
+          T=$(git ls-remote --tags --refs https://github.com/ggml-org/llama.cpp 'refs/tags/b50*' | sed 's#.*refs/tags/##' | sort -V | head -1)
+          echo "Using llama.cpp tag: $T"
+          test -n "$T"
+          git clone --depth 1 --branch "$T" https://github.com/ggml-org/llama.cpp work/iChatOffline/app/src/main/cpp/llama.cpp
       - name: Build debug APK
         working-directory: work/iChatOffline
         run: gradle assembleDebug --no-daemon --stacktrace

@@ -20,12 +20,17 @@ jobs:
           Z=$(ls *.zip | LC_ALL=C sort | tail -1)
           echo "Using $Z"
           unzip -o "$Z" -d work
-      - name: Get llama.cpp
+      - name: Get llama.cpp (أحدث تاج رقمي b*)
         run: |
-          T=$(git ls-remote --tags --refs https://github.com/ggml-org/llama.cpp 'refs/tags/b50*' | sed 's#.*refs/tags/##' | sort -V | head -1)
+          T=$(git ls-remote --tags --refs https://github.com/ggml-org/llama.cpp \
+            | grep -oE 'refs/tags/b[0-9]+$' \
+            | sed 's#refs/tags/##' \
+            | sort -V \
+            | tail -1)
           echo "Using llama.cpp tag: $T"
           test -n "$T"
           git clone --depth 1 --branch "$T" https://github.com/ggml-org/llama.cpp work/iChatOffline/app/src/main/cpp/llama.cpp
+          test -f work/iChatOffline/app/src/main/cpp/llama.cpp/tools/mtmd/mtmd.h
       - name: Build debug APK
         working-directory: work/iChatOffline
         run: gradle assembleDebug --no-daemon --stacktrace

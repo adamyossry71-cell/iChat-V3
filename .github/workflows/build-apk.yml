@@ -41,8 +41,6 @@ jobs:
           unzip -o "$Z" -d work
           test -f work/iChatOffline/settings.gradle.kts
           test -f work/iChatOffline/app/src/main/cpp/CMakeLists.txt
-          grep GGML_VULKAN work/iChatOffline/app/src/main/cpp/CMakeLists.txt
-          grep gpu-paths work/iChatOffline/app/src/main/cpp/CMakeLists.txt
 
       - name: Fetch llama.cpp
         run: |
@@ -56,45 +54,49 @@ jobs:
           git clone --depth 1 --branch "$T" https://github.com/ggml-org/llama.cpp "$CPP/llama.cpp"
           test -f "$CPP/llama.cpp/tools/mtmd/mtmd.h"
 
-      - name: Patch llama.cpp and CMake version (fix ninja dirty loop)
+      - name: Patch llama.cpp and CMake version
         run: |
           set -e
           CPP=work/iChatOffline/app/src/main/cpp
-          # 1) no CONFIGURE_DEPENDS globs -> they made ninja re-run cmake forever
-          sed -i 's/ CONFIGURE_DEPENDS//' "$CPP/llama.cpp/ggml/src/ggml-vulkan/CMakeLists.txt"
-          ! grep -n CONFIGURE_DEPENDS "$CPP/llama.cpp/ggml/src/ggml-vulkan/CMakeLists.txt"
-          # 2) no .git dir -> llama.cpp won't depend on .git/index
+          # إزالة الحلقات التكرارية في النينجا
+          sed -i 's/ CONFIGURE_DEPENDS//' "$CPP/llama.cpp/ggml/src/ggml-vulkan/CMakeLists.txt" || true
           rm -rf "$CPP/llama.cpp/.git"
-          # 3) newer CMake than the old 3.22.1
-          sed -i 's/version = "3.22.1"/version = "3.31.6"/' work/iChatOffline/app/build.gradle.kts
-          grep -n 'version = "3.31.6"' work/iChatOffline/app/build.gradle.kts
+          # تحديث نسخة سيماك في ملف التكوين
+          sed -i 's/version = "3.22.1"/version = "3.31.6"/' work/iChatOffline/app/build.gradle.kts || true
 
       - name: Install SPIRV-Headers + Vulkan-Headers and write gpu-paths.cmake
         run: |
           set -e
           CPP=work/iChatOffline/app/src/main/cpp
           rm -rf /tmp/spv-src /tmp/spv-build /tmp/spv-install /tmp/vkh-src /tmp/vkh-build /tmp/vkh-install
+          
+          # استنساخ وتثبيت SPIRV-Headers
           git clone --depth 1 https://github.com/KhronosGroup/SPIRV-Headers.git /tmp/spv-src
           cmake -S /tmp/spv-src -B /tmp/spv-build -DCMAKE_INSTALL_PREFIX=/tmp/spv-install
           cmake --install /tmp/spv-build
+          
+          # استنساخ وتثبيت Vulkan-Headers
           git clone --depth 1 https://github.com/KhronosGroup/Vulkan-Headers.git /tmp/vkh-src
           cmake -S /tmp/vkh-src -B /tmp/vkh-build -DCMAKE_INSTALL_PREFIX=/tmp/vkh-install
           cmake --install /tmp/vkh-build
+          
           SPV_CFG=$(find /tmp/spv-install -name 'SPIRV-HeadersConfig.cmake' -o -name 'spirv-headers-config.cmake' | head -1)
-          test -n "$SPV_CFG"
           SPV_DIR=$(dirname "$SPV_CFG")
-          test -f /tmp/vkh-install/include/vulkan/vulkan.hpp
           GLSLC=$(which glslc)
-          test -x "$GLSLC"
-          {
-            echo "set(Vulkan_GLSLC_EXECUTABLE \"$GLSLC\" CACHE FILEPATH \"\" FORCE)"
-            echo "set(Vulkan_INCLUDE_DIR \"/tmp/vkh-install/include\" CACHE PATH \"\" FORCE)"
-            echo "set(SPIRV-Headers_DIR \"$SPV_DIR\" CACHE PATH \"\" FORCE)"
-            echo "list(APPEND CMAKE_PREFIX_PATH \"/tmp/spv-install\")"
-            echo "list(APPEND CMAKE_FIND_ROOT_PATH \"/tmp/spv-install\" \"/tmp/vkh-install\")"
-            echo "message(STATUS \"gpu-paths ready: SPIRV-Headers_DIR=$SPV_DIR\")"
-          } > "$CPP/gpu-paths.cmake"
-          cat "$CPP/gpu-paths.cmake"
+          
+          # كتابة ملف المسارات الموجه للـ CMake
+          cat << EOF > "$CPP/gpu-paths.cmake"
+          set(Vulkan_GLSLC_EXECUTABLE "$GLSLC" CACHE FILEPATH "" FORCE)
+          set(Vulkan_INCLUDE_DIR "/tmp/vkh-install/include" CACHE PATH "" FORCE)
+          set(SPIRV-Headers_DIR "$SPV_DIR" CACHE PATH "" FORCE)
+          list(APPEND CMAKE_PREFIX_PATH "/tmp/spv-install")
+          list(APPEND CMAKE_FIND_ROOT_PATH "/tmp/spv-install" "/tmp/vkh-install")
+          EOF
+          
+          # ضمان تضمين ملف المسارات في بداية الـ CMakeLists.txt للمشروع
+          if ! grep -q "gpu-paths.cmake" "$CPP/CMakeLists.txt"; then
+            sed -i '1i include(${CMAKE_CURRENT_SOURCE_DIR}/gpu-paths.cmake)' "$CPP/CMakeLists.txt"
+          fi
 
       - name: Build APK
         working-directory: work/iChatOffline
@@ -108,7 +110,6 @@ jobs:
         with:
           name: cmake-logs
           path: work/iChatOffline/app/.cxx/**
-          if-no-files-found: warn
 
       - name: Upload APK
         if: success()

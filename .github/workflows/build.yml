@@ -3,24 +3,28 @@ name: Build APK (Vulkan GPU)
 on:
   workflow_dispatch:
   push:
-    branches: [main]
+    branches:
+      - main
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - uses: actions/setup-java@v4
+      - name: Setup Java
+        uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: 17
+          java-version: "17"
 
-      - uses: gradle/actions/setup-gradle@v4
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: "8.7"
 
-      - name: Install host Vulkan tools (glslc)
+      - name: Install Vulkan host tools
         run: |
           set -e
           sudo apt-get update
@@ -28,59 +32,60 @@ jobs:
           which glslc
           glslc --version
 
-      - name: Unzip project (newest zip by name)
+      - name: Unzip project
         run: |
           set -e
           Z=$(ls *.zip | LC_ALL=C sort | tail -1)
-          echo "Using $Z"
+          echo "Using zip: $Z"
           rm -rf work
           unzip -o "$Z" -d work
           test -f work/iChatOffline/settings.gradle.kts
-          grep -n 'GGML_VULKAN' work/iChatOffline/app/src/main/cpp/CMakeLists.txt
+          test -f work/iChatOffline/app/src/main/cpp/CMakeLists.txt
+          grep GGML_VULKAN work/iChatOffline/app/src/main/cpp/CMakeLists.txt
 
-      - name: Get llama.cpp + SPIRV-Headers and write gpu-paths.cmake
+      - name: Fetch llama.cpp
         run: |
           set -e
-          T=\( (git ls-remote --tags --refs https://github.com/ggml-org/llama.cpp | grep -oE 'refs/tags/b7[3-6][0-9]{2} \)' | sed 's#refs/tags/##' | sort -V | tail -1)
-          if [ -z "$T" ]; then
-            T=\( (git ls-remote --tags --refs https://github.com/ggml-org/llama.cpp | grep -oE 'refs/tags/b[0-9]+ \)' | sed 's#refs/tags/##' | sort -V | tail -1)
-          fi
-          echo "Using llama.cpp tag: $T"
+          git ls-remote --tags --refs https://github.com/ggml-org/llama.cpp > /tmp/llama-tags.txt
+          T=$(grep -o "refs/tags/b[0-9][0-9]*" /tmp/llama-tags.txt | sed "s|refs/tags/||" | sort -V | tail -1)
+          echo "llama tag=$T"
           test -n "$T"
-          CPP_DIR="work/iChatOffline/app/src/main/cpp"
-          rm -rf "$CPP_DIR/llama.cpp"
-          git clone --depth 1 --branch "$T" https://github.com/ggml-org/llama.cpp "$CPP_DIR/llama.cpp"
-          test -f "$CPP_DIR/llama.cpp/tools/mtmd/mtmd.h"
+          CPP=work/iChatOffline/app/src/main/cpp
+          rm -rf "$CPP/llama.cpp"
+          git clone --depth 1 --branch "$T" https://github.com/ggml-org/llama.cpp "$CPP/llama.cpp"
+          test -f "$CPP/llama.cpp/tools/mtmd/mtmd.h"
+
+      - name: Install SPIRV-Headers and write gpu-paths.cmake
+        run: |
+          set -e
+          CPP=work/iChatOffline/app/src/main/cpp
           rm -rf /tmp/SPIRV-Headers-src /tmp/SPIRV-Headers-build /tmp/SPIRV-Headers-install
           git clone --depth 1 https://github.com/KhronosGroup/SPIRV-Headers.git /tmp/SPIRV-Headers-src
           cmake -S /tmp/SPIRV-Headers-src -B /tmp/SPIRV-Headers-build -DCMAKE_INSTALL_PREFIX=/tmp/SPIRV-Headers-install
           cmake --install /tmp/SPIRV-Headers-build
           test -d /tmp/SPIRV-Headers-install
-          GLSLC="$(which glslc)"
+          GLSLC=$(which glslc)
           test -x "$GLSLC"
-          echo "Using glslc at: $GLSLC"
-          echo "set(Vulkan_GLSLC_EXECUTABLE \"$GLSLC\" CACHE FILEPATH \"\" FORCE)" > "$CPP_DIR/gpu-paths.cmake"
-          echo "set(CMAKE_PREFIX_PATH \"/tmp/SPIRV-Headers-install\" CACHE STRING \"\" FORCE)" >> "$CPP_DIR/gpu-paths.cmake"
-          echo "list(APPEND CMAKE_PREFIX_PATH \"/tmp/SPIRV-Headers-install\")" >> "$CPP_DIR/gpu-paths.cmake"
-          echo "message(STATUS \"gpu-paths: glslc=$GLSLC\")" >> "$CPP_DIR/gpu-paths.cmake"
-          echo "message(STATUS \"gpu-paths: SPIRV=/tmp/SPIRV-Headers-install\")" >> "$CPP_DIR/gpu-paths.cmake"
+          echo "glslc=$GLSLC"
+          printf 'set(Vulkan_GLSLC_EXECUTABLE "%s" CACHE FILEPATH "" FORCE)\n' "$GLSLC" > "$CPP/gpu-paths.cmake"
+          printf 'set(CMAKE_PREFIX_PATH "/tmp/SPIRV-Headers-install" CACHE STRING "" FORCE)\n' >> "$CPP/gpu-paths.cmake"
+          printf 'list(APPEND CMAKE_PREFIX_PATH "/tmp/SPIRV-Headers-install")\n' >> "$CPP/gpu-paths.cmake"
+          printf 'message(STATUS "gpu-paths ready")\n' >> "$CPP/gpu-paths.cmake"
           echo "---- gpu-paths.cmake ----"
-          cat "$CPP_DIR/gpu-paths.cmake"
+          cat "$CPP/gpu-paths.cmake"
 
-      - name: Build debug APK (Vulkan)
+      - name: Build APK
         working-directory: work/iChatOffline
         run: |
           set -e
           gradle assembleDebug --no-daemon --stacktrace
 
-      - name: Upload cmake logs on failure
+      - name: Upload logs if failed
         if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: cmake-logs
-          path: |
-            work/iChatOffline/app/.cxx/**
-            work/iChatOffline/app/build/**/*.log
+          path: work/iChatOffline/app/.cxx/**
           if-no-files-found: warn
 
       - name: Upload APK

@@ -8,10 +8,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Install SPIRV-Headers for Vulkan
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y spirv-headers
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -24,7 +20,7 @@ jobs:
           Z=$(ls *.zip | LC_ALL=C sort | tail -1)
           echo "Using $Z"
           unzip -o "$Z" -d work
-      - name: Get llama.cpp (أحدث تاج رقمي b*)
+      - name: Get llama.cpp and SPIRV-Headers
         run: |
           T=$(git ls-remote --tags --refs https://github.com/ggml-org/llama.cpp \
             | grep -oE 'refs/tags/b[0-9]+$' \
@@ -33,8 +29,11 @@ jobs:
             | tail -1)
           echo "Using llama.cpp tag: $T"
           test -n "$T"
-          git clone --depth 1 --branch "$T" https://github.com/ggml-org/llama.cpp work/iChatOffline/app/src/main/cpp/llama.cpp
-          test -f work/iChatOffline/app/src/main/cpp/llama.cpp/tools/mtmd/mtmd.h
+          CPP_DIR="work/iChatOffline/app/src/main/cpp"
+          git clone --depth 1 --branch "$T" https://github.com/ggml-org/llama.cpp "$CPP_DIR/llama.cpp"
+          
+          # استنساخ مكتبة SPIRV-Headers رسمياً لحل مشكلة الـ Vulkan على أندرويد
+          git clone --depth 1 https://github.com/KhronosGroup/SPIRV-Headers.git "$CPP_DIR/SPIRV-Headers"
       - name: Build debug APK
         working-directory: work/iChatOffline
         run: gradle assembleDebug --no-daemon --stacktrace

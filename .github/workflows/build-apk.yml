@@ -42,7 +42,7 @@ jobs:
           test -f work/iChatOffline/settings.gradle.kts
           test -f work/iChatOffline/app/src/main/cpp/CMakeLists.txt
 
-      - name: Fetch llama.cpp and Vulkan Headers
+      - name: Fetch llama.cpp
         run: |
           set -e
           git ls-remote --tags --refs https://github.com/ggml-org/llama.cpp > /tmp/llama-tags.txt
@@ -52,30 +52,36 @@ jobs:
           CPP=work/iChatOffline/app/src/main/cpp
           rm -rf "$CPP/llama.cpp"
           git clone --depth 1 --branch "$T" https://github.com/ggml-org/llama.cpp "$CPP/llama.cpp"
-          
-          VULKAN_SRC="$CPP/llama.cpp/ggml/src/ggml-vulkan"
-          rm -rf "$VULKAN_SRC/SPIRV-Headers" "$VULKAN_SRC/Vulkan-Headers"
-          git clone --depth 1 https://github.com/KhronosGroup/SPIRV-Headers.git "$VULKAN_SRC/SPIRV-Headers"
-          git clone --depth 1 https://github.com/KhronosGroup/Vulkan-Headers.git "$VULKAN_SRC/Vulkan-Headers"
-          
           rm -rf "$CPP/llama.cpp/.git"
 
-      - name: Patch ggml-vulkan CMakeLists and Fix Timestamps
+      - name: Install SPIRV-Headers and Vulkan-Headers properly
         run: |
           set -e
-          VULKAN_CMAKE="work/iChatOffline/app/src/main/cpp/llama.cpp/ggml/src/ggml-vulkan/CMakeLists.txt"
-          
-          sed -i 's/ CONFIGURE_DEPENDS//' "$VULKAN_CMAKE" || true
-          
-          echo "include_directories(\${CMAKE_CURRENT_SOURCE_DIR}/SPIRV-Headers/include)" >> "$VULKAN_CMAKE"
-          echo "include_directories(\${CMAKE_CURRENT_SOURCE_DIR}/Vulkan-Headers/include)" >> "$VULKAN_CMAKE"
-          
-          find work/iChatOffline/app/src/main/cpp -type f -exec touch {} +
+          rm -rf /tmp/vulkan-sdk
+          mkdir -p /tmp/vulkan-sdk
 
-      - name: Build APK
+          # تثبيت SPIRV-Headers بالمسار الصحيح
+          git clone --depth 1 https://github.com/KhronosGroup/SPIRV-Headers.git /tmp/spv-src
+          cmake -S /tmp/spv-src -B /tmp/spv-build -DCMAKE_INSTALL_PREFIX=/tmp/vulkan-sdk
+          cmake --install /tmp/spv-build
+
+          # تثبيت Vulkan-Headers بالمسار الصحيح
+          git clone --depth 1 https://github.com/KhronosGroup/Vulkan-Headers.git /tmp/vkh-src
+          cmake -S /tmp/vkh-src -B /tmp/vkh-build -DCMAKE_INSTALL_PREFIX=/tmp/vulkan-sdk
+          cmake --install /tmp/vkh-build
+
+          echo "CMAKE_PREFIX_PATH=/tmp/vulkan-sdk" >> $GITHUB_ENV
+          echo "Vulkan_GLSLC_EXECUTABLE=$(which glslc)" >> $GITHUB_ENV
+
+      - name: Clean CMake Cache & Build APK
         working-directory: work/iChatOffline
+        env:
+          CMAKE_PREFIX_PATH: ${{ env.CMAKE_PREFIX_PATH }}
+          Vulkan_GLSLC_EXECUTABLE: ${{ env.Vulkan_GLSLC_EXECUTABLE }}
         run: |
           set -e
+          # مسح الكاش القديم لمنع خطأ Ninja Dirty manifest نهائياً
+          rm -rf app/.cxx app/build
           gradle assembleDebug --no-daemon --stacktrace
 
       - name: Upload APK

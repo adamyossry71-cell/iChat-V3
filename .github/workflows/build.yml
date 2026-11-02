@@ -26,8 +26,6 @@ jobs:
           sudo apt-get install -y glslc libvulkan-dev pkg-config cmake ninja-build
           which glslc
           glslc --version || true
-          echo "Vulkan_GLSLC_EXECUTABLE=$(which glslc)" >> $GITHUB_ENV
-          echo "VULKAN_GLSLC=$(which glslc)" >> $GITHUB_ENV
 
       - name: Unzip project (newest zip by name)
         run: |
@@ -37,9 +35,9 @@ jobs:
           rm -rf work
           unzip -o "$Z" -d work
           test -f work/iChatOffline/settings.gradle.kts
-          grep -q 'GGML_VULKAN ON' work/iChatOffline/app/src/main/cpp/CMakeLists.txt
+          grep -n 'GGML_VULKAN' work/iChatOffline/app/src/main/cpp/CMakeLists.txt
 
-      - name: Get llama.cpp + SPIRV-Headers
+      - name: Get llama.cpp + SPIRV-Headers and write gpu-paths.cmake
         run: |
           set -e
           T=$(git ls-remote --tags --refs https://github.com/ggml-org/llama.cpp \
@@ -61,30 +59,46 @@ jobs:
           git clone --depth 1 --branch "$T" https://github.com/ggml-org/llama.cpp "$CPP_DIR/llama.cpp"
           test -f "$CPP_DIR/llama.cpp/tools/mtmd/mtmd.h"
 
-          # SPIRV-Headers (CONFIG package) — مهم لـ ggml-vulkan
-          rm -rf "$CPP_DIR/SPIRV-Headers" /tmp/SPIRV-Headers-src /tmp/SPIRV-Headers-build /tmp/SPIRV-Headers-install
+          rm -rf /tmp/SPIRV-Headers-src /tmp/SPIRV-Headers-build /tmp/SPIRV-Headers-install
           git clone --depth 1 https://github.com/KhronosGroup/SPIRV-Headers.git /tmp/SPIRV-Headers-src
           cmake -S /tmp/SPIRV-Headers-src -B /tmp/SPIRV-Headers-build -DCMAKE_INSTALL_PREFIX=/tmp/SPIRV-Headers-install
           cmake --install /tmp/SPIRV-Headers-build
-          echo "CMAKE_PREFIX_PATH=/tmp/SPIRV-Headers-install" >> $GITHUB_ENV
-          echo "SPIRV_HEADERS_INSTALL=/tmp/SPIRV-Headers-install" >> $GITHUB_ENV
+
+          GLSLC=$(which glslc)
+          echo "glslc=$GLSLC"
+          test -x "$GLSLC"
+          test -d /tmp/SPIRV-Headers-install
+
+          # ملف يقرأه CMakeLists مباشرة (أثبت من env عبر Gradle)
+          cat > "$CPP_DIR/gpu-paths.cmake" <<EOF
+set(Vulkan_GLSLC_EXECUTABLE "$GLSLC" CACHE FILEPATH "" FORCE)
+list(APPEND CMAKE_PREFIX_PATH "/tmp/SPIRV-Headers-install")
+set(CMAKE_PREFIX_PATH "\${CMAKE_PREFIX_PATH}" CACHE STRING "" FORCE)
+message(STATUS "gpu-paths: glslc=\${Vulkan_GLSLC_EXECUTABLE}")
+message(STATUS "gpu-paths: PREFIX=\${CMAKE_PREFIX_PATH}")
+EOF
+          echo "---- gpu-paths.cmake ----"
+          cat "$CPP_DIR/gpu-paths.cmake"
 
       - name: Build debug APK (Vulkan)
         working-directory: work/iChatOffline
-        env:
-          Vulkan_GLSLC_EXECUTABLE: ${{ env.Vulkan_GLSLC_EXECUTABLE }}
-          VULKAN_GLSLC: ${{ env.VULKAN_GLSLC }}
-          CMAKE_PREFIX_PATH: ${{ env.CMAKE_PREFIX_PATH }}
         run: |
           set -e
-          echo "glslc=$Vulkan_GLSLC_EXECUTABLE"
-          echo "CMAKE_PREFIX_PATH=$CMAKE_PREFIX_PATH"
-          # مرر المسارات لـ CMake عبر Gradle
-          printf '\nandroid.defaults.buildfeatures.prefab=true\n' >> gradle.properties || true
-          gradle assembleDebug --no-daemon --stacktrace \
-            -Pandroid.native.buildOutput=verbose
+          gradle assembleDebug --no-daemon --stacktrace
+
+      - name: Upload cmake logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cmake-logs
+          path: |
+            work/iChatOffline/app/.cxx/**/CMake*.log
+            work/iChatOffline/app/.cxx/**/output.log
+            work/iChatOffline/app/build/**/*.log
+          if-no-files-found: warn
 
       - uses: actions/upload-artifact@v4
+        if: success()
         with:
           name: iChat-debug-apk-gpu
           path: work/iChatOffline/app/build/outputs/apk/debug/*.apk

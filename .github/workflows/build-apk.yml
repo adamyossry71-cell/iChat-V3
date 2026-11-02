@@ -42,7 +42,7 @@ jobs:
           test -f work/iChatOffline/settings.gradle.kts
           test -f work/iChatOffline/app/src/main/cpp/CMakeLists.txt
 
-      - name: Fetch llama.cpp
+      - name: Fetch llama.cpp and Vulkan Headers
         run: |
           set -e
           git ls-remote --tags --refs https://github.com/ggml-org/llama.cpp > /tmp/llama-tags.txt
@@ -52,51 +52,30 @@ jobs:
           CPP=work/iChatOffline/app/src/main/cpp
           rm -rf "$CPP/llama.cpp"
           git clone --depth 1 --branch "$T" https://github.com/ggml-org/llama.cpp "$CPP/llama.cpp"
-          test -f "$CPP/llama.cpp/tools/mtmd/mtmd.h"
-
-      - name: Patch llama.cpp and CMake version
-        run: |
-          set -e
-          CPP=work/iChatOffline/app/src/main/cpp
-          # إزالة الحلقات التكرارية في النينجا
-          sed -i 's/ CONFIGURE_DEPENDS//' "$CPP/llama.cpp/ggml/src/ggml-vulkan/CMakeLists.txt" || true
+          
+          # استنساخ الترويسات مباشرة داخل مجلد ggml-vulkan
+          VULKAN_SRC="$CPP/llama.cpp/ggml/src/ggml-vulkan"
+          rm -rf "$VULKAN_SRC/SPIRV-Headers" "$VULKAN_SRC/Vulkan-Headers"
+          git clone --depth 1 https://github.com/KhronosGroup/SPIRV-Headers.git "$VULKAN_SRC/SPIRV-Headers"
+          git clone --depth 1 https://github.com/KhronosGroup/Vulkan-Headers.git "$VULKAN_SRC/Vulkan-Headers"
+          
+          # إزالة مجلد .git لمنع مشاكل النينجا
           rm -rf "$CPP/llama.cpp/.git"
-          # تحديث نسخة سيماك في ملف التكوين
-          sed -i 's/version = "3.22.1"/version = "3.31.6"/' work/iChatOffline/app/build.gradle.kts || true
 
-      - name: Install SPIRV-Headers + Vulkan-Headers and write gpu-paths.cmake
+      - name: Patch ggml-vulkan CMakeLists and Fix Timestamps
         run: |
           set -e
-          CPP=work/iChatOffline/app/src/main/cpp
-          rm -rf /tmp/spv-src /tmp/spv-build /tmp/spv-install /tmp/vkh-src /tmp/vkh-build /tmp/vkh-install
+          VULKAN_CMAKE="work/iChatOffline/app/src/main/cpp/llama.cpp/ggml/src/ggml-vulkan/CMakeLists.txt"
           
-          # استنساخ وتثبيت SPIRV-Headers
-          git clone --depth 1 https://github.com/KhronosGroup/SPIRV-Headers.git /tmp/spv-src
-          cmake -S /tmp/spv-src -B /tmp/spv-build -DCMAKE_INSTALL_PREFIX=/tmp/spv-install
-          cmake --install /tmp/spv-build
+          # إزالة الحلقات التكرارية لو وجدت
+          sed -i 's/ CONFIGURE_DEPENDS//' "$VULKAN_CMAKE" || true
           
-          # استنساخ وتثبيت Vulkan-Headers
-          git clone --depth 1 https://github.com/KhronosGroup/Vulkan-Headers.git /tmp/vkh-src
-          cmake -S /tmp/vkh-src -B /tmp/vkh-build -DCMAKE_INSTALL_PREFIX=/tmp/vkh-install
-          cmake --install /tmp/vkh-build
+          # حقن مسارات الهيدرز مباشرة
+          echo "include_directories(\${CMAKE_CURRENT_SOURCE_DIR}/SPIRV-Headers/include)" >> "$VULKAN_CMAKE"
+          echo "include_directories(\${CMAKE_CURRENT_SOURCE_DIR}/Vulkan-Headers/include)" >> "$VULKAN_CMAKE"
           
-          SPV_CFG=$(find /tmp/spv-install -name 'SPIRV-HeadersConfig.cmake' -o -name 'spirv-headers-config.cmake' | head -1)
-          SPV_DIR=$(dirname "$SPV_CFG")
-          GLSLC=$(which glslc)
-          
-          # كتابة ملف المسارات الموجه للـ CMake
-          cat << EOF > "$CPP/gpu-paths.cmake"
-          set(Vulkan_GLSLC_EXECUTABLE "$GLSLC" CACHE FILEPATH "" FORCE)
-          set(Vulkan_INCLUDE_DIR "/tmp/vkh-install/include" CACHE PATH "" FORCE)
-          set(SPIRV-Headers_DIR "$SPV_DIR" CACHE PATH "" FORCE)
-          list(APPEND CMAKE_PREFIX_PATH "/tmp/spv-install")
-          list(APPEND CMAKE_FIND_ROOT_PATH "/tmp/spv-install" "/tmp/vkh-install")
-          EOF
-          
-          # ضمان تضمين ملف المسارات في بداية الـ CMakeLists.txt للمشروع
-          if ! grep -q "gpu-paths.cmake" "$CPP/CMakeLists.txt"; then
-            sed -i '1i include(${CMAKE_CURRENT_SOURCE_DIR}/gpu-paths.cmake)' "$CPP/CMakeLists.txt"
-          fi
+          # حل مشكلة Ninja Dirty عن طريق تحديث وقت الملفات
+          find work/iChatOffline/app/src/main/cpp -type f -exec touch {} +
 
       - name: Build APK
         working-directory: work/iChatOffline
@@ -104,15 +83,7 @@ jobs:
           set -e
           gradle assembleDebug --no-daemon --stacktrace
 
-      - name: Upload logs if failed
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: cmake-logs
-          path: work/iChatOffline/app/.cxx/**
-
       - name: Upload APK
-        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: iChat-debug-apk-gpu

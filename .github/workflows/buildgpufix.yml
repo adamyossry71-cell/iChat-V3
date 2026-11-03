@@ -1,0 +1,115 @@
+name: Build APK (Vulkan GPU)
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.7"
+
+      - name: Install Vulkan host tools
+        run: |
+          set -e
+          sudo apt-get update
+          sudo apt-get install -y glslc libvulkan-dev pkg-config cmake ninja-build
+          which glslc
+          glslc --version
+
+      - name: Unzip project
+        run: |
+          set -e
+          Z=$(ls *.zip | LC_ALL=C sort | tail -1)
+          echo "Using zip: $Z"
+          rm -rf work
+          unzip -o "$Z" -d work
+          test -f work/iChatOffline/settings.gradle.kts
+          test -f work/iChatOffline/app/src/main/cpp/CMakeLists.txt
+
+      - name: Fetch llama.cpp
+        run: |
+          set -e
+          git ls-remote --tags --refs https://github.com/ggml-org/llama.cpp > /tmp/llama-tags.txt
+          T=$(grep -o "refs/tags/b[0-9][0-9]*" /tmp/llama-tags.txt | sed "s|refs/tags/||" | sort -V | tail -1)
+          echo "llama tag=$T"
+          test -n "$T"
+          CPP=work/iChatOffline/app/src/main/cpp
+          rm -rf "$CPP/llama.cpp"
+          git clone --depth 1 --branch "$T" https://github.com/ggml-org/llama.cpp "$CPP/llama.cpp"
+          rm -rf "$CPP/llama.cpp/.git"
+
+      - name: Install SPIRV-Headers + Vulkan-Headers and generate gpu-paths.cmake
+        run: |
+          set -e
+          CPP=work/iChatOffline/app/src/main/cpp
+          rm -rf /tmp/spv-src /tmp/spv-build /tmp/spv-install /tmp/vkh-src /tmp/vkh-build /tmp/vkh-install
+
+          # SPIRV-Headers
+          git clone --depth 1 https://github.com/KhronosGroup/SPIRV-Headers.git /tmp/spv-src
+          cmake -S /tmp/spv-src -B /tmp/spv-build -DCMAKE_INSTALL_PREFIX=/tmp/spv-install
+          cmake --install /tmp/spv-build
+
+          # Vulkan-Headers
+          git clone --depth 1 https://github.com/KhronosGroup/Vulkan-Headers.git /tmp/vkh-src
+          cmake -S /tmp/vkh-src -B /tmp/vkh-build -DCMAKE_INSTALL_PREFIX=/tmp/vkh-install
+          cmake --install /tmp/vkh-build
+
+          # sanity check: the header the compiler complained about must exist
+          test -f /tmp/spv-install/include/spirv/unified1/spirv.hpp
+          test -f /tmp/vkh-install/include/vulkan/vulkan.hpp
+
+          SPV_CFG=$(find /tmp/spv-install -name 'SPIRV-HeadersConfig.cmake' -o -name 'spirv-headers-config.cmake' | head -1)
+          SPV_DIR=$(dirname "$SPV_CFG")
+          GLSLC=$(which glslc)
+
+          cat << EOF > "$CPP/gpu-paths.cmake"
+          set(Vulkan_GLSLC_EXECUTABLE "$GLSLC" CACHE FILEPATH "" FORCE)
+          set(Vulkan_INCLUDE_DIR "/tmp/vkh-install/include" CACHE PATH "" FORCE)
+          set(SPIRV-Headers_DIR "$SPV_DIR" CACHE PATH "" FORCE)
+          list(APPEND CMAKE_PREFIX_PATH "/tmp/spv-install")
+          list(APPEND CMAKE_FIND_ROOT_PATH "/tmp/spv-install" "/tmp/vkh-install")
+          # FIX: ggml-vulkan does #include <spirv/unified1/spirv.hpp> but the NDK build never
+          # adds the SPIRV-Headers include dir to the compile line -> add it explicitly.
+          set(CMAKE_C_FLAGS   "\${CMAKE_C_FLAGS} -isystem /tmp/spv-install/include -isystem /tmp/vkh-install/include")
+          set(CMAKE_CXX_FLAGS "\${CMAKE_CXX_FLAGS} -isystem /tmp/spv-install/include -isystem /tmp/vkh-install/include")
+          include_directories(SYSTEM "/tmp/spv-install/include" "/tmp/vkh-install/include")
+          EOF
+
+          cat "$CPP/gpu-paths.cmake"
+
+      - name: Raise minSdk to 28 (Vulkan 1.1 symbols in NDK libvulkan.so)
+        run: |
+          set -e
+          F=work/iChatOffline/app/build.gradle.kts
+          sed -i 's/minSdk = [0-9]\+/minSdk = 28/' "$F"
+          grep -n "minSdk" "$F"
+          grep -q "minSdk = 28" "$F"
+
+      - name: Clean Cache & Build APK
+        working-directory: work/iChatOffline
+        run: |
+          set -e
+          rm -rf app/.cxx app/build
+          gradle assembleDebug --no-daemon --stacktrace
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: iChat-debug-apk-gpu
+          path: work/iChatOffline/app/build/outputs/apk/debug/*.apk
